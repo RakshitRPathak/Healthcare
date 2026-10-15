@@ -1,5 +1,7 @@
-node_modules
-dist
-e2e/screenshots
-test-results
-playwright-report
+node_modules/
+dist/
+.env
+dump.rdb
+*.log
+client/test-results/
+client/playwright-report/

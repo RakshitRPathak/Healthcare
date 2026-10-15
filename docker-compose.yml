@@ -1,0 +1,41 @@
+# docker compose up --build   ->  app on http://localhost:8080, API docs at http://localhost:8080/api/openapi.json
+# Demo data:  docker compose exec server npx tsx src/seed.ts
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment: { POSTGRES_USER: ham, POSTGRES_PASSWORD: ham, POSTGRES_DB: ham }
+    volumes: [pgdata:/var/lib/postgresql/data]
+    healthcheck: { test: ["CMD-SHELL", "pg_isready -U ham -d ham"], interval: 5s, timeout: 3s, retries: 10 }
+
+  redis:
+    image: redis:7-alpine
+    healthcheck: { test: ["CMD", "redis-cli", "ping"], interval: 5s, timeout: 3s, retries: 10 }
+
+  server:
+    build: ./server
+    env_file: [{ path: .env, required: false }]
+    environment:
+      DATABASE_URL: postgresql://ham:ham@postgres:5432/ham
+      REDIS_URL: redis://redis:6379
+      CLIENT_URL: http://localhost:8080
+      TRUST_PROXY: "1"            # behind the nginx container: per-IP throttling sees the real client address
+    depends_on: { postgres: { condition: service_healthy }, redis: { condition: service_healthy } }
+    ports: ["3000:3000"]
+
+  worker:
+    build: ./server
+    command: ["npx", "tsx", "src/worker.ts"]
+    env_file: [{ path: .env, required: false }]
+    environment:
+      DATABASE_URL: postgresql://ham:ham@postgres:5432/ham
+      REDIS_URL: redis://redis:6379
+    depends_on: { server: { condition: service_healthy }, redis: { condition: service_healthy } }
+    healthcheck: { disable: true }
+
+  client:
+    build: ./client
+    ports: ["8080:80"]
+    depends_on: [server]
+
+volumes:
+  pgdata:

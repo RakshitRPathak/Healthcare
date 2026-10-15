@@ -1,0 +1,269 @@
+openapi: 3.0.3
+info:
+  title: Healthcare Appointment & Follow-up Manager API
+  version: 2.0.0
+  description: |
+    Booking, doctor leave, post-visit follow-ups and AI-assisted visit summaries.
+    Errors are always `{ "error": { "code", "message", "details?" } }`. Times are ISO-8601 with offset.
+servers: [{ url: http://localhost:3000 }]
+tags: [{ name: Auth }, { name: Appointments }, { name: Doctors }, { name: Summaries }, { name: Patients }, { name: Admin }, { name: Ops }]
+components:
+  securitySchemes:
+    bearer: { type: http, scheme: bearer, bearerFormat: JWT }
+  parameters:
+    Id: { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+  responses:
+    Error:
+      description: Error
+      content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+    NoContent: { description: No content }
+  schemas:
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties: { code: { type: string, example: SLOT_ALREADY_BOOKED }, message: { type: string }, details: {} }
+    Appointment:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        doctor_id: { type: string, format: uuid }
+        patient_id: { type: string, format: uuid }
+        start_at: { type: string, format: date-time }
+        end_at: { type: string, format: date-time }
+        status: { type: string, enum: [HELD, CONFIRMED, CANCELLED, CANCELLED_LEAVE, COMPLETED, NO_SHOW, EXPIRED] }
+        reason: { type: string, nullable: true }
+        hold_expires_at: { type: string, format: date-time, nullable: true }
+        doctor_name: { type: string }
+        patient_name: { type: string }
+    Medication:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        dosage: { type: string }
+        instructions: { type: string, nullable: true }
+        times_of_day: { type: array, items: { type: string, example: '08:00' } }
+        start_date: { type: string, format: date }
+        end_date: { type: string, format: date }
+        next_reminder_at: { type: string, format: date-time, nullable: true }
+        doctor_name: { type: string }
+    Summary:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        kind: { type: string, enum: [PRE, POST] }
+        status: { type: string, enum: [PENDING, GENERATED, FALLBACK] }
+        source: { type: string, enum: [llm, fallback, doctor], nullable: true }
+        content: { type: object, nullable: true }
+        approved_at: { type: string, format: date-time, nullable: true }
+    Leave:
+      type: object
+      properties: { id: { type: string, format: uuid }, start_at: { type: string, format: date-time }, end_at: { type: string, format: date-time }, reason: { type: string, nullable: true } }
+    Token:
+      type: object
+      properties: { token: { type: string }, role: { type: string, enum: [PATIENT, DOCTOR, ADMIN] } }
+security: [{ bearer: [] }]
+paths:
+  /health:
+    get: { tags: [Ops], security: [], summary: Liveness (checks the database), responses: { '200': { description: OK } } }
+  /ready:
+    get: { tags: [Ops], security: [], summary: Readiness (database migrated), responses: { '200': { description: Ready }, '503': { $ref: '#/components/responses/Error' } } }
+  /openapi.json:
+    get: { tags: [Ops], security: [], summary: This specification as JSON, responses: { '200': { description: OpenAPI document } } }
+  /auth/register:
+    post:
+      tags: [Auth]
+      security: []
+      summary: Patient sign-up (throttled per IP)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password, name]
+              properties:
+                email: { type: string, format: email }
+                password: { type: string, minLength: 8 }
+                name: { type: string }
+                timezone: { type: string, example: Asia/Kolkata }
+                dob: { type: string, format: date }
+                allergies: { type: string }
+                chronicConditions: { type: string }
+      responses:
+        '201': { description: Created, content: { application/json: { schema: { type: object, properties: { id: { type: string }, token: { type: string } } } } } }
+        '409': { $ref: '#/components/responses/Error' }
+        '429': { $ref: '#/components/responses/Error' }
+  /auth/login:
+    post:
+      tags: [Auth]
+      security: []
+      summary: Log in (10 attempts / 15 min per IP+email)
+      requestBody:
+        required: true
+        content: { application/json: { schema: { type: object, required: [email, password], properties: { email: { type: string }, password: { type: string } } } } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/Token' } } } }
+        '401': { $ref: '#/components/responses/Error' }
+        '429': { $ref: '#/components/responses/Error' }
+  /me:
+    get: { tags: [Auth], summary: Current user (doctors also get specialty and calendar status), responses: { '200': { description: OK }, '401': { $ref: '#/components/responses/Error' } } }
+  /doctors:
+    get: { tags: [Doctors], summary: List doctors, responses: { '200': { description: OK } } }
+  /doctors/{id}/slots:
+    get:
+      tags: [Doctors]
+      summary: Free slots for a doctor on a calendar day (doctor's time zone), excluding bookings, live holds and leave
+      parameters:
+        - $ref: '#/components/parameters/Id'
+        - { name: date, in: query, required: true, schema: { type: string, format: date } }
+      responses: { '200': { description: OK } }
+  /doctors/me/leaves:
+    get: { tags: [Doctors], summary: List own leave, responses: { '200': { description: OK } } }
+    post:
+      tags: [Doctors]
+      summary: Add leave; 409 LEAVE_CONFLICTS lists appointments unless cancelConflicts=true
+      requestBody:
+        required: true
+        content: { application/json: { schema: { type: object, required: [startsAt, endsAt], properties: { startsAt: { type: string, format: date-time }, endsAt: { type: string, format: date-time }, reason: { type: string }, cancelConflicts: { type: boolean } } } } }
+      responses: { '201': { description: Created }, '409': { $ref: '#/components/responses/Error' } }
+  /doctors/me/leaves/{id}:
+    delete: { tags: [Doctors], summary: Remove leave, parameters: [{ $ref: '#/components/parameters/Id' }], responses: { '204': { $ref: '#/components/responses/NoContent' } } }
+  /doctors/me/calendar/connect:
+    get: { tags: [Doctors], summary: Start the Google Calendar OAuth flow; returns the consent URL, responses: { '200': { description: '{ url }' }, '501': { $ref: '#/components/responses/Error' } } }
+  /doctors/me/calendar:
+    delete: { tags: [Doctors], summary: Disconnect Google Calendar, responses: { '204': { $ref: '#/components/responses/NoContent' } } }
+  /calendar/callback:
+    get:
+      tags: [Doctors]
+      security: []
+      summary: Google redirects here; authenticated by the signed `state`, redirects back to the client
+      parameters:
+        - { name: code, in: query, schema: { type: string } }
+        - { name: state, in: query, required: true, schema: { type: string } }
+        - { name: error, in: query, schema: { type: string } }
+      responses: { '302': { description: Redirect to the client }, '400': { $ref: '#/components/responses/Error' } }
+  /appointments:
+    post:
+      tags: [Appointments]
+      summary: Book directly (patient). 409 SLOT_ALREADY_BOOKED / PATIENT_TIME_CONFLICT / DOCTOR_ON_LEAVE
+      requestBody:
+        required: true
+        content: { application/json: { schema: { type: object, required: [doctorId, startAt, reason], properties: { doctorId: { type: string, format: uuid }, startAt: { type: string, format: date-time }, reason: { type: string } } } } }
+      responses: { '201': { description: Created }, '409': { $ref: '#/components/responses/Error' } }
+    get:
+      tags: [Appointments]
+      summary: Appointments for the caller (patient, doctor or all for admin); total in X-Total-Count
+      parameters:
+        - { name: scope, in: query, schema: { type: string, enum: [all, upcoming, past, needs_action], default: all } }
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 200 } }
+        - { name: offset, in: query, schema: { type: integer, minimum: 0 } }
+      responses:
+        '200':
+          description: OK
+          headers: { X-Total-Count: { schema: { type: integer } } }
+          content: { application/json: { schema: { type: array, items: { $ref: '#/components/schemas/Appointment' } } } }
+  /appointments/hold:
+    post:
+      tags: [Appointments]
+      summary: Hold a slot for 5 minutes
+      requestBody:
+        required: true
+        content: { application/json: { schema: { type: object, required: [doctorId, startAt], properties: { doctorId: { type: string, format: uuid }, startAt: { type: string, format: date-time } } } } }
+      responses: { '201': { description: Held }, '409': { $ref: '#/components/responses/Error' } }
+  /appointments/{id}/confirm:
+    post:
+      tags: [Appointments]
+      summary: Confirm a hold. 410 HOLD_EXPIRED when the 5 minutes are over
+      parameters: [{ $ref: '#/components/parameters/Id' }]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { type: object, required: [reason], properties: { reason: { type: string } } } } }
+      responses: { '200': { description: Confirmed }, '410': { $ref: '#/components/responses/Error' } }
+  /appointments/{id}/reschedule:
+    post:
+      tags: [Appointments]
+      summary: Move a confirmed appointment to another slot of the same doctor, atomically
+      parameters: [{ $ref: '#/components/parameters/Id' }]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { type: object, required: [startAt], properties: { startAt: { type: string, format: date-time } } } } }
+      responses: { '200': { description: New appointment }, '409': { $ref: '#/components/responses/Error' } }
+  /appointments/{id}/no-show:
+    post:
+      tags: [Appointments]
+      summary: Doctor marks an ended, confirmed appointment as a no-show
+      parameters: [{ $ref: '#/components/parameters/Id' }]
+      responses: { '200': { description: Updated }, '409': { $ref: '#/components/responses/Error' } }
+  /appointments/{id}:
+    delete:
+      tags: [Appointments]
+      summary: Cancel
+      parameters:
+        - $ref: '#/components/parameters/Id'
+        - { name: reason, in: query, schema: { type: string, maxLength: 300 } }
+      responses: { '200': { description: Cancelled } }
+  /appointments/{id}/complete:
+    post:
+      tags: [Appointments]
+      summary: Doctor completes a visit; prescriptions create medication reminders and trigger the post-visit summary
+      parameters: [{ $ref: '#/components/parameters/Id' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [notes]
+              properties:
+                notes: { type: string }
+                medications:
+                  type: array
+                  items:
+                    type: object
+                    required: [name, dosage, timesOfDay, durationDays]
+                    properties: { name: { type: string }, dosage: { type: string }, instructions: { type: string }, timesOfDay: { type: array, items: { type: string, example: '08:00' } }, durationDays: { type: integer } }
+      responses: { '200': { description: Completed } }
+  /appointments/{id}/summaries:
+    get:
+      tags: [Summaries]
+      summary: Summaries for an appointment. Patients only see an approved POST summary; doctors see both
+      parameters: [{ $ref: '#/components/parameters/Id' }]
+      responses: { '200': { description: OK, content: { application/json: { schema: { type: array, items: { $ref: '#/components/schemas/Summary' } } } } } }
+  /summaries/{id}/approve:
+    post:
+      tags: [Summaries]
+      summary: Doctor approves (optionally edits) the post-visit summary, releasing it to the patient
+      parameters: [{ $ref: '#/components/parameters/Id' }]
+      responses: { '200': { description: Approved } }
+  /medications:
+    get:
+      tags: [Patients]
+      summary: Active prescriptions with the next pending reminder
+      responses: { '200': { description: OK, content: { application/json: { schema: { type: array, items: { $ref: '#/components/schemas/Medication' } } } } } }
+  /admin/doctors:
+    post: { tags: [Admin], summary: Create a doctor with working hours, responses: { '201': { description: Created }, '409': { $ref: '#/components/responses/Error' } } }
+  /admin/notifications:
+    get:
+      tags: [Admin]
+      summary: Notifications by status (default DEAD)
+      parameters: [{ name: status, in: query, schema: { type: string, enum: [PENDING, QUEUED, SENDING, SENT, FAILED, DEAD, CANCELLED] } }]
+      responses: { '200': { description: OK } }
+  /admin/notifications/{id}/retry:
+    post: { tags: [Admin], summary: Re-queue a DEAD or FAILED notification, parameters: [{ $ref: '#/components/parameters/Id' }], responses: { '200': { description: Requeued } } }
+  /admin/audit:
+    get:
+      tags: [Admin]
+      summary: Append-only audit trail (newest first)
+      parameters:
+        - { name: actorId, in: query, schema: { type: string, format: uuid } }
+        - { name: action, in: query, schema: { type: string } }
+        - { name: resourceId, in: query, schema: { type: string } }
+        - { name: limit, in: query, schema: { type: integer, maximum: 500 } }
+      responses: { '200': { description: OK } }
+  /admin/stats:
+    get: { tags: [Admin], summary: Counts of appointments, notifications, users and summary sources, responses: { '200': { description: OK } } }
