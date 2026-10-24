@@ -68,9 +68,3 @@ Three were in the original server; the second was in my new client and was caugh
 - **Login throttle leaked memory (original)** (entries never removed). Replaced with a swept, bounded version.
 - **API and worker starting together could race on migrations (original).** Now serialised with an advisory lock.
 
-## Honest limits
-- **Not exercised live:** Google OAuth/Calendar and OpenAI are tested with fakes only. The code follows Google's and OpenAI's documented flows, but I did not run it against real accounts, so expect to debug the first real connection (redirect URI settings in the Google console in particular).
-- **Docker files are untested.** There was no Docker daemon where this was built; `docker compose config` validates, but the images were not built or run. The same stack (server, worker, built client, Postgres, Redis) was run natively for the end-to-end tests.
-- **No Prisma.** The data layer is plain `pg` + SQL, which suits the exclusion constraints and explicit row locks. (Prisma's engine could not be downloaded when the project was first built.)
-- **Not a HIPAA or GDPR compliance claim.** It adds encryption of calendar tokens, an audit trail and PHI-read logging, but still needs database encryption at rest, retention and deletion policy, access reviews, and a security review before real patient data.
-- Throttling is per process; use a shared store (Redis) if you run several API instances. Reschedule is same-doctor only. Summaries are in English.
